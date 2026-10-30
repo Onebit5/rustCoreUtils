@@ -1,6 +1,6 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, FileType};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
@@ -150,6 +150,43 @@ fn relative_time(then: SystemTime, now: SystemTime) -> String {
     }
 }
 
+fn escape_name(name: &OsString) -> String {
+    let mut out = String::with_capacity(name.len());
+    for chunk in name.as_bytes().utf8_chunks() {
+        for c in chunk.valid().chars() {
+            if c == '\\' {
+                out.push_str("\\\\");
+            } else if c.is_control() {
+                // escape the utf-8 bytes, not the code point, so \xNN always means "this raw byte"
+                // and the outpyt stays reversible
+                let mut buf = [0; 4];
+                for &b in c.encode_utf8(&mut buf).as_bytes() {
+                    push_byte_escape(&mut out, b);
+                }
+            } else {
+                    out.push(c);
+            }
+        }
+        for &b in chunk.invalid() {
+            push_byte_escape(&mut out, b);
+        }
+    }
+    out
+}
+
+fn push_byte_escape(out: &mut String, b: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push_str("\\x");
+    out.push(char::from(HEX[usize::from(b >> 4)]));
+    out.push(char::from(HEX[usize::from(b & 0xf)]));
+}
+
+#[derive(Clone, Copy)]
+enum Layout {
+    Table,
+    Tsv,
+}
+
 enum Align {
     Left,
     Right,
@@ -170,16 +207,31 @@ fn row(entry: &Entry, now: SystemTime) -> Row {
         Err(_) => ("?".to_string(), "?".to_string()),
     };
     [
-        entry.name.to_string_lossy().into_owned(),
+        escape_name(&entry.name),
         entry.kind.label().to_string(),
         size,
         modified,
     ]
 }
 
-fn render(out: &mut impl Write, entries: &[Entry], now: SystemTime) -> io::Result<()> {
+fn render(
+    out: &mut impl Write,
+    layout: Layout,
+    entries: &[Entry],
+    now: SystemTime)
+-> io::Result<()> {
     let rows: Vec<Row> = entries.iter().map(|e| row(e, now)).collect();
-    table(out, &rows)
+    match layout {
+        Layout::Table => table(out, &rows),
+        Layout::Tsv => tsv(out, &rows),
+    }
+}
+
+fn tsv(out: &mut impl Write, rows: &[Row]) -> io:: Result<()> {
+    for row in rows {
+        writeln!(out, "{}", row.join("\t"))?;
+    }
+    Ok(())
 }
 
 fn table(out: &mut impl Write, rows: &[Row]) -> io::Result<()> {
@@ -212,8 +264,14 @@ fn table_row(out: &mut impl Write, row: &Row, widths: &[usize; 4]) -> io::Result
 }
 
 fn main() -> io::Result<()> {
+    let stdout = io::stdout();
+    let layout = if stdout.is_terminal() {
+        Layout::Table
+    } else {
+        Layout::Tsv
+    };
     let entries = read_entries(Path::new("."))?;
-    render(&mut io::stdout().lock(), &entries, SystemTime::now())
+    render(&mut io::stdout().lock(), layout, &entries, SystemTime::now())
 }
 
 // test will have its own file and directory, also CI/CD on GitHub
