@@ -1,10 +1,12 @@
 use std::ffi::OsString;
 use std::fs::{self, FileType};
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::time::SystemTime;
+
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -148,20 +150,73 @@ fn relative_time(then: SystemTime, now: SystemTime) -> String {
     }
 }
 
-fn main() {
-    let now = SystemTime::now();
-    let entries = read_entries(Path::new(".")).unwrap();
-    for entry in &entries {
-        let meta = entry.meta.as_ref().unwrap();
-        println!("{}\t{}\t{}\t{}",
-            entry.name.to_string_lossy(),
-            entry.kind.label(),
-            human_size(meta.len),
-            relative_time(meta.modified, now),
-        );
-    }
+enum Align {
+    Left,
+    Right,
 }
 
+const GAP: usize = 2;
+const HEADER: [&str; 4] = ["name", "type", "size", "modified"];
+const ALIGN: [Align; 4] = [Align::Left, Align::Left, Align::Right, Align::Left];
+
+type Row = [String; 4];
+
+fn row(entry: &Entry, now: SystemTime) -> Row {
+    let (size, modified) = match &entry.meta {
+        Ok(meta) if entry.kind == Kind::File => {
+            (human_size(meta.len), relative_time(meta.modified, now))
+        }
+        Ok(meta) => ("-".to_string(), relative_time(meta.modified, now)),
+        Err(_) => ("?".to_string(), "?".to_string()),
+    };
+    [
+        entry.name.to_string_lossy().into_owned(),
+        entry.kind.label().to_string(),
+        size,
+        modified,
+    ]
+}
+
+fn render(out: &mut impl Write, entries: &[Entry], now: SystemTime) -> io::Result<()> {
+    let rows: Vec<Row> = entries.iter().map(|e| row(e, now)).collect();
+    table(out, &rows)
+}
+
+fn table(out: &mut impl Write, rows: &[Row]) -> io::Result<()> {
+    let header = HEADER.map(String::from);
+    let mut widths = [0; 4];
+    for row in std::iter::once(&header).chain(rows) {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.width());
+        }
+    }
+    let rule = widths.map(|w| "=".repeat(w)); // change character
+    for row in [&header, &rule].into_iter().chain(rows) {
+        table_row(out, row, &widths)?;
+    }
+    Ok(())
+}
+
+fn table_row(out: &mut impl Write, row: &Row, widths: &[usize; 4]) -> io::Result<()> {
+    let mut owed = 0;
+    for ((cell, width), align) in row.iter().zip(widths).zip(ALIGN) {
+        let pad = width - cell.width();
+        let (before, after) = match align {
+            Align::Left => (0, pad),
+            Align::Right => (pad, 0),
+        };
+        write!(out, "{:n$}{cell}", "", n = owed + before)?;
+        owed = after + GAP;
+    }
+    writeln!(out)
+}
+
+fn main() -> io::Result<()> {
+    let entries = read_entries(Path::new("."))?;
+    render(&mut io::stdout().lock(), &entries, SystemTime::now())
+}
+
+// test will have its own file and directory, also CI/CD on GitHub
 #[cfg(test)]
 mod test {
     use super::*;
@@ -258,4 +313,11 @@ mod test {
     fn time_future() {
         assert_eq!(ahead(2 * 86400), "in 2 days");
     }
+
+    /*
+    const HOUR: u64 = 3600;
+
+    fn now() -> SystemTime {
+
+    } */
 }
