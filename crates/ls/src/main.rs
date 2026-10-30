@@ -4,6 +4,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
+use std::time::SystemTime;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -54,9 +55,17 @@ impl From<FileType> for Kind {
     }
 }
 
+struct Meta {
+    len: u64,
+    modified: SystemTime,
+}
+
 struct Entry {
     name: OsString,
     kind: Kind,
+    // the lstat error stays with the entry so the caller can report it and the renderer can still
+    // show the name and type
+    meta: io::Result<Meta>,
 }
 
 fn read_entries(path: &Path) -> io::Result<Vec<Entry>> {
@@ -68,7 +77,13 @@ fn read_entries(path: &Path) -> io::Result<Vec<Entry>> {
             continue;
         }
         let kind = dirent.file_type().map_or(Kind::Unknown, Kind::from);
-        entries.push(Entry { name, kind });
+        let meta = dirent.metadata().and_then(|md| {
+            Ok(Meta {
+                len: md.len(),
+                modified: md.modified()?,
+            })
+        });
+        entries.push(Entry { name, kind, meta });
     }
     sort_entries(&mut entries);
     Ok(entries)
@@ -86,21 +101,77 @@ fn sort_entries(entries: &mut [Entry]) {
     });
 }
 
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut unit = 1;
+    loop {
+        let div = 1u128 << (10 * unit);
+        let tenths = (u128::from(bytes) * 10 + div / 2) / div;
+        if tenths < 10240 || unit == UNITS.len() - 1 {
+            return format!("{}.{} {}", tenths / 10, tenths % 10, UNITS[unit]);
+        }
+        unit += 1;
+    }
+}
+
+fn relative_time(then: SystemTime, now: SystemTime) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    const UNITS: [(u64, &str); 6] = [
+        (365 * DAY, "year"),
+        (30 * DAY, "month"),
+        (7 * DAY, "week"),
+        (DAY, "day"),
+        (HOUR, "hour"),
+        (MINUTE, "minute"),
+    ];
+
+    // mtimes in the future are real; clock skew, touch -d, extracted tarballs...
+    let (secs, future) = match now.duration_since(then) {
+        Ok(age) => (age.as_secs(), false),
+        Err(err) => (err.duration().as_secs(), true)
+    };
+    let Some(&(len, unit)) = UNITS.iter().find(|&&(len, _)| secs >= len) else {
+        return "just now".to_string();
+    };
+    let n = secs / len;
+    let s = if n == 1 { "" } else { "s" };
+    if future {
+        format!("in {n} {unit}{s}")
+    } else {
+        format!("{n} {unit}{s} ago")
+    }
+}
+
 fn main() {
+    let now = SystemTime::now();
     let entries = read_entries(Path::new(".")).unwrap();
     for entry in &entries {
-        println!("{}\t{}", entry.name.to_string_lossy(), entry.kind.label());
+        let meta = entry.meta.as_ref().unwrap();
+        println!("{}\t{}\t{}\t{}",
+            entry.name.to_string_lossy(),
+            entry.kind.label(),
+            human_size(meta.len),
+            relative_time(meta.modified, now),
+        );
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::time::Duration;
 
     fn entry(name: &str, kind: Kind) -> Entry {
         Entry {
             name: name.into(),
             kind,
+            meta: Err(io::ErrorKind::NotFound.into()),
         }
     }
 
@@ -130,5 +201,61 @@ mod test {
         let mut entries = vec![entry("b", Kind::File), entry("B", Kind::File)];
         sort_entries(&mut entries);
         assert_eq!(names(&entries), ["B", "b"]);
+    }
+
+    #[test]
+    fn size_bytes() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(312), "312 B");
+        assert_eq!(human_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn size_units() {
+        assert_eq!(human_size(1024), "1.0 KiB");
+        assert_eq!(human_size(1536), "1.5 KiB");
+        assert_eq!(human_size(3 << 30), "3.0 GiB");
+    }
+
+    #[test]
+    fn size_rounds_up_into_next_unit() {
+        assert_eq!(human_size(1024 * 1024 - 1), "1.0 MiB");
+    }
+
+    #[test]
+    fn size_max() {
+        assert_eq!(human_size(u64::MAX), "16.0 EiB");
+    }
+
+    fn ago(secs: u64) -> String {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        relative_time(now - Duration::from_secs(secs), now)
+    }
+
+    fn ahead(secs: u64) -> String {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        relative_time(now + Duration::from_secs(secs), now)
+    }
+
+    #[test]
+    fn time_just_now() {
+        assert_eq!(ago(0), "just now");
+        assert_eq!(ago(59), "just now");
+        assert_eq!(ahead(30), "just now");
+    }
+
+    #[test]
+    fn time_singular_and_plural() {
+        assert_eq!(ago(60), "1 minute ago");
+        assert_eq!(ago(2 * 3600 + 59), "2 hours ago");
+        assert_eq!(ago(86400), "1 day ago");
+        assert_eq!(ago(21 * 86400), "3 weeks ago");
+        assert_eq!(ago(45 * 86400), "1 month ago");
+        assert_eq!(ago(400 * 86400), "1 year ago");
+    }
+
+    #[test]
+    fn time_future() {
+        assert_eq!(ahead(2 * 86400), "in 2 days");
     }
 }
