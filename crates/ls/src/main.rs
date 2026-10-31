@@ -242,7 +242,7 @@ fn table(out: &mut impl Write, rows: &[Row]) -> io::Result<()> {
             *width = (*width).max(cell.width());
         }
     }
-    let rule = widths.map(|w| "=".repeat(w)); // change character
+    let rule = widths.map(|w| "─".repeat(w));
     for row in [&header, &rule].into_iter().chain(rows) {
         table_row(out, row, &widths)?;
     }
