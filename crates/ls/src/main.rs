@@ -136,7 +136,7 @@ fn relative_time(then: SystemTime, now: SystemTime) -> String {
     // mtimes in the future are real; clock skew, touch -d, extracted tarballs...
     let (secs, future) = match now.duration_since(then) {
         Ok(age) => (age.as_secs(), false),
-        Err(err) => (err.duration().as_secs(), true)
+        Err(err) => (err.duration().as_secs(), true),
     };
     let Some(&(len, unit)) = UNITS.iter().find(|&&(len, _)| secs >= len) else {
         return "just now".to_string();
@@ -150,7 +150,7 @@ fn relative_time(then: SystemTime, now: SystemTime) -> String {
     }
 }
 
-fn escape_name(name: &OsString) -> String {
+fn escape_name(name: &OsStr) -> String {
     let mut out = String::with_capacity(name.len());
     for chunk in name.as_bytes().utf8_chunks() {
         for c in chunk.valid().chars() {
@@ -158,13 +158,13 @@ fn escape_name(name: &OsString) -> String {
                 out.push_str("\\\\");
             } else if c.is_control() {
                 // escape the utf-8 bytes, not the code point, so \xNN always means "this raw byte"
-                // and the outpyt stays reversible
+                // and the output stays reversible
                 let mut buf = [0; 4];
                 for &b in c.encode_utf8(&mut buf).as_bytes() {
                     push_byte_escape(&mut out, b);
                 }
             } else {
-                    out.push(c);
+                out.push(c);
             }
         }
         for &b in chunk.invalid() {
@@ -218,8 +218,8 @@ fn render(
     out: &mut impl Write,
     layout: Layout,
     entries: &[Entry],
-    now: SystemTime)
--> io::Result<()> {
+    now: SystemTime,
+) -> io::Result<()> {
     let rows: Vec<Row> = entries.iter().map(|e| row(e, now)).collect();
     match layout {
         Layout::Table => table(out, &rows),
@@ -227,7 +227,7 @@ fn render(
     }
 }
 
-fn tsv(out: &mut impl Write, rows: &[Row]) -> io:: Result<()> {
+fn tsv(out: &mut impl Write, rows: &[Row]) -> io::Result<()> {
     for row in rows {
         writeln!(out, "{}", row.join("\t"))?;
     }
@@ -271,7 +271,7 @@ fn main() -> io::Result<()> {
         Layout::Tsv
     };
     let entries = read_entries(Path::new("."))?;
-    render(&mut io::stdout().lock(), layout, &entries, SystemTime::now())
+    render(&mut stdout.lock(), layout, &entries, SystemTime::now())
 }
 
 // test will have its own file and directory, also CI/CD on GitHub
