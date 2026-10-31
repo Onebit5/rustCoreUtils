@@ -9,3 +9,8 @@ path = "src/ls/main.rs"
 
 [dependencies]
 unicode-width = "0.2"
+
+[lints.rust]
+non_snake_case = "deny"
+non_camel_case_types = "deny"
+non_upper_case_globals = "deny"
