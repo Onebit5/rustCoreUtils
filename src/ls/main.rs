@@ -1,4 +1,6 @@
+use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::fs::{self, FileType};
 use std::io::{self, BufWriter, IsTerminal, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -8,6 +10,38 @@ use std::process::ExitCode;
 use std::time::SystemTime;
 
 use unicode_width::UnicodeWidthStr;
+
+const HELP: &str = r"usage: ls [-h | --help]
+
+list the current directory: directories first, then everything else,
+each group sorted by name, ignoring case. hidden entries (names starting
+with '.') are not shown.
+
+on a terminal the listing is a table:
+
+  name        type     size  modified
+  ──────────  ────  ───────  ─────────────
+  src         dir         -  5 minutes ago
+  Cargo.toml  file    312 B  2 hours ago
+
+when stdout is not a terminal, the same four columns are written as
+tab-separated values, one entry per line, with no header.
+
+sizes are in IEC units (1 KiB = 1024 bytes) and only shown for regular
+files. modified is relative to now.
+
+in names, '\' is written as '\\', and control characters and bytes that
+are not valid UTF-8 are written as '\xNN'.
+
+options:
+  -h, --help    print this help and exit
+
+exit status:
+  0  ok
+  1  some entries could not be read (their fields show '?')
+  2  the directory could not be read, the command line is wrong, or
+     writing the output failed
+";
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -264,6 +298,50 @@ fn table_row(out: &mut impl Write, row: &Row, widths: &[usize; 4]) -> io::Result
     writeln!(out)
 }
 
+#[derive(Debug, PartialEq)]
+enum Command {
+    List,
+    Help,
+}
+
+#[derive(Debug, PartialEq)]
+enum UsageError {
+    UnrecognizedOption(OsString),
+    UnexpectedArgument(OsString),
+}
+
+impl fmt::Display for UsageError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            UsageError::UnrecognizedOption(arg) => {
+                write!(f, "unrecognized option '{}'", escape_name(arg))
+            }
+            UsageError::UnexpectedArgument(arg) => write!(
+                f,
+                "unexpected argument '{}' (paths are not supported yet)",
+                escape_name(arg)
+            ),
+        }
+    }
+}
+
+fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageError> {
+    let mut args = args.into_iter();
+    let Some(arg) = args.next() else {
+        return Ok(Command::List);
+    };
+    match arg.as_bytes() {
+        b"-h" | b"--help" => Ok(Command::Help),
+        b"--" => match args.next() {
+            None => Ok(Command::List),
+            Some(arg) => Err(UsageError::UnexpectedArgument(arg)),
+        },
+        // "-" alone is an operand, not an option
+        [b'-', _, ..] => Err(UsageError::UnrecognizedOption(arg)),
+        _ => Err(UsageError::UnexpectedArgument(arg)),
+    }
+}
+
 fn list(out: &mut impl Write, layout: Layout) -> io::Result<u8> {
     let entries = match read_entries(Path::new(".")) {
         Ok(entries) => entries,
@@ -285,6 +363,15 @@ fn list(out: &mut impl Write, layout: Layout) -> io::Result<u8> {
 }
 
 fn main() -> ExitCode {
+    let command = match parse_args(env::args_os().skip(1)) {
+        Ok(command) => command,
+        Err(err) => {
+            eprintln!("ls: {err}");
+            eprintln!("Try 'ls --help' for more information.");
+            return ExitCode::from(2);
+        }
+    };
+
     let stdout = io::stdout();
     let layout = if stdout.is_terminal() {
         Layout::Table
@@ -293,7 +380,10 @@ fn main() -> ExitCode {
     };
     let mut out = BufWriter::new(stdout.lock());
 
-    let status = list(&mut out, layout);
+    let status = match command {
+        Command::Help => out.write_all(HELP.as_bytes()).map(|()| 0),
+        Command::List => list(&mut out, layout),
+    };
     // BufWriter's drop ignores write errors; flush by hand or `ls > /dev/full` exits 0 having
     // written nothing
     match status.and_then(|status| out.flush().map(|()| status)) {

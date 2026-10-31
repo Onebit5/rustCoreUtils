@@ -219,3 +219,55 @@ fn escape_c1_control_as_utf8_bytes() {
 fn escape_invalid_utf8() {
     assert_eq!(esc(b"bad\xffname"), "bad\\xffname");
 }
+
+fn parse_strs(args: &[&str]) -> Result<Command, UsageError> {
+    parse_args(args.iter().map(OsString::from))
+}
+
+#[test]
+fn no_args_lists() {
+    assert_eq!(parse_strs(&[]), Ok(Command::List));
+}
+
+#[test]
+fn help_short_and_long() {
+    assert_eq!(parse_strs(&["-h"]), Ok(Command::Help));
+    assert_eq!(parse_strs(&["--help"]), Ok(Command::Help));
+}
+
+#[test]
+fn help_wins_over_what_follows() {
+    assert_eq!(parse_strs(&["--help", "--bogus"]), Ok(Command::Help));
+}
+
+#[test]
+fn unknown_options_are_errors_not_ignored() {
+    for opt in ["-l", "-la", "-hl", "--all", "--h"] {
+        assert_eq!(
+            parse_strs(&[opt]),
+            Err(UsageError::UnrecognizedOption(opt.into())),
+            "{opt}"
+        );
+    }
+}
+
+#[test]
+fn paths_are_not_supported_yet() {
+    assert_eq!(
+        parse_strs(&["src"]),
+        Err(UsageError::UnexpectedArgument("src".into()))
+    );
+    assert_eq!(
+        parse_strs(&["-"]),
+        Err(UsageError::UnexpectedArgument("-".into()))
+    );
+}
+
+#[test]
+fn double_dash_ends_options() {
+    assert_eq!(parse_strs(&["--"]), Ok(Command::List));
+    assert_eq!(
+        parse_strs(&["--", "--help"]),
+        Err(UsageError::UnexpectedArgument("--help".into()))
+    );
+}

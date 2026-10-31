@@ -179,3 +179,41 @@ fn unreadable_dir_is_an_error() {
         "ls: cannot read directory '.': Permission denied (os error 13)\n"
     );
 }
+
+#[test]
+fn help_short_and_long_are_identical() {
+    let dir = fixture("help_short_and_long_are_identical");
+    let short = run(&dir, &["-h"]);
+    let long = run(&dir, &["--help"]);
+
+    assert!(short.status.success());
+    assert!(stdout(&short).starts_with("usage: ls"));
+    assert_eq!(stderr(&short), "");
+    assert_eq!(short.stdout, long.stdout);
+}
+
+#[test]
+fn unknown_option_is_usage_error() {
+    let dir = fixture("unknown_option_is_usage_error");
+    let out = run(&dir, &["-l"]);
+
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(
+        stderr(&out),
+        "ls: unrecognized option '-l'\nTry 'ls --help' for more information.\n"
+    );
+}
+
+#[test]
+fn path_argument_is_usage_error() {
+    let dir = fixture("path_argument_is_usage_error");
+    let out = run(&dir, &["src"]);
+
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        stderr(&out),
+        "ls: unexpected argument 'src' (paths are not supported yet)\n\
+         Try 'ls --help' for more information.\n"
+    );
+}
