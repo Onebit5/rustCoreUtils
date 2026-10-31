@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::ffi::OsStringExt;
 use std::time::Duration;
 
 fn entry(name: &str, kind: Kind) -> Entry {
@@ -62,13 +63,11 @@ fn size_max() {
 }
 
 fn ago(secs: u64) -> String {
-    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
-    relative_time(now - Duration::from_secs(secs), now)
+    relative_time(now() - Duration::from_secs(secs), now())
 }
 
 fn ahead(secs: u64) -> String {
-    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
-    relative_time(now + Duration::from_secs(secs), now)
+    relative_time(now() + Duration::from_secs(secs), now())
 }
 
 #[test]
@@ -93,9 +92,130 @@ fn time_future() {
     assert_eq!(ahead(2 * 86400), "in 2 days");
 }
 
-/*
 const HOUR: u64 = 3600;
 
 fn now() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000)
+}
 
-} */
+fn with_meta(name: &str, kind: Kind, len: u64, age: u64) -> Entry {
+    Entry {
+        name: name.into(),
+        kind,
+        meta: Ok(Meta {
+            len,
+            modified: now() - Duration::from_secs(age),
+        }),
+    }
+}
+
+fn show(layout: Layout, entries: &[Entry]) -> String {
+    let mut out = Vec::new();
+    render(&mut out, layout, entries, now()).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn table_aligns_columns() {
+    let entries = [
+        with_meta("src", Kind::Dir, 4096, 300),
+        with_meta("Cargo.lock", Kind::File, 1234, 2 * HOUR),
+        with_meta("Cargo.toml", Kind::File, 312, 2 * HOUR),
+    ];
+    assert_eq!(
+        show(Layout::Table, &entries),
+        "\
+name        type     size  modified
+──────────  ────  ───────  ─────────────
+src         dir         -  5 minutes ago
+Cargo.lock  file  1.2 KiB  2 hours ago
+Cargo.toml  file    312 B  2 hours ago
+"
+    );
+}
+
+#[test]
+fn table_measures_display_width_not_bytes() {
+    let entries = [
+        with_meta("日本語.txt", Kind::File, 0, 0),
+        with_meta("a.txt", Kind::File, 0, 0),
+    ];
+    assert_eq!(
+        show(Layout::Table, &entries),
+        "\
+name        type  size  modified
+──────────  ────  ────  ────────
+日本語.txt  file   0 B  just now
+a.txt       file   0 B  just now
+"
+    );
+}
+
+#[test]
+fn table_of_empty_dir_is_just_the_header() {
+    assert_eq!(
+        show(Layout::Table, &[]),
+        "\
+name  type  size  modified
+────  ────  ────  ────────
+"
+    );
+}
+
+#[test]
+fn unreadable_meta_shows_question_marks() {
+    let entries = [Entry {
+        name: "secret".into(),
+        kind: Kind::File,
+        meta: Err(io::ErrorKind::PermissionDenied.into()),
+    }];
+    assert_eq!(
+        show(Layout::Table, &entries),
+        "\
+name    type  size  modified
+──────  ────  ────  ────────
+secret  file     ?  ?
+"
+    );
+}
+
+#[test]
+fn tsv_has_no_header_and_escapes_tabs() {
+    let entries = [
+        with_meta("src", Kind::Dir, 4096, 300),
+        with_meta("a\tb", Kind::File, 2048, 2 * HOUR),
+    ];
+    assert_eq!(
+        show(Layout::Tsv, &entries),
+        "src\tdir\t-\t5 minutes ago\na\\x09b\tfile\t2.0 KiB\t2 hours ago\n"
+    );
+}
+
+fn esc(bytes: &[u8]) -> String {
+    escape_name(&OsString::from_vec(bytes.to_vec()))
+}
+
+#[test]
+fn escape_leaves_normal_names_alone() {
+    assert_eq!(esc(b"Cargo.toml"), "Cargo.toml");
+    assert_eq!(esc("日本語.txt".as_bytes()), "日本語.txt");
+    assert_eq!(esc(b"with space"), "with space");
+}
+
+#[test]
+fn escape_control_and_backslash() {
+    assert_eq!(esc(b"evil\nname"), "evil\\x0aname");
+    assert_eq!(esc(b"tab\there"), "tab\\x09here");
+    assert_eq!(esc(b"\x1b[31mred"), "\\x1b[31mred");
+    assert_eq!(esc(b"back\\slash"), "back\\\\slash");
+}
+
+#[test]
+fn escape_c1_control_as_utf8_bytes() {
+    assert_eq!(esc("\u{9b}".as_bytes()), "\\xc2\\x9b");
+}
+
+#[test]
+fn escape_invalid_utf8() {
+    assert_eq!(esc(b"bad\xffname"), "bad\\xffname");
+}
