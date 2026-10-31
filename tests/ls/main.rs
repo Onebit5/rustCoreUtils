@@ -1,9 +1,9 @@
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, SystemTime};
 
 const HOUR: u64 = 3600;
@@ -119,4 +119,63 @@ fn future_mtime() {
     let out = run(&dir, &[]);
 
     assert_eq!(stdout(&out), "from-the-future\tfile\t0 B\tin 2 days\n");
+}
+
+#[test]
+fn write_error_is_reported() {
+    let dir = fixture("write_error_is_reported");
+    file(&dir, "a", 0, 0);
+    let full = File::options().write(true).open("/dev/full").unwrap();
+
+    let out = ls(&dir, &[]).stdout(full).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        stderr(&out),
+        "ls: write error: No space left on device (os error 28)\n"
+    );
+}
+
+#[test]
+fn broken_pipe_is_quiet() {
+    let dir = fixture("broken_pipe_is_quiet");
+    // well past the 64 KiB pipe buffer, so ls is still writing when the
+    // reader goes away
+    for i in 0..10_000 {
+        fs::write(dir.join(format!("file-{i:05}")), b"").unwrap();
+    }
+
+    let mut child = ls(&dir, &[])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(stderr(&out), "");
+}
+
+#[test]
+fn unreadable_dir_is_an_error() {
+    let dir = fixture("unreadable_dir_is_an_error");
+    file(&dir, "a", 0, 0);
+    let mode = |m| fs::set_permissions(&dir, fs::Permissions::from_mode(m)).unwrap();
+    // search but no read: ls can chdir into it, but not list it
+    mode(0o100);
+    let readable_anyway = fs::read_dir(&dir).is_ok();
+    let out = run(&dir, &[]);
+    mode(0o755);
+    if readable_anyway {
+        // root ignores the mode bits, there is nothing to test
+        return;
+    }
+
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(
+        stderr(&out),
+        "ls: cannot read directory '.': Permission denied (os error 13)\n"
+    );
 }

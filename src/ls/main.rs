@@ -1,9 +1,10 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, FileType};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufWriter, IsTerminal, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
+use std::process::ExitCode;
 use std::time::SystemTime;
 
 use unicode_width::UnicodeWidthStr;
@@ -263,15 +264,48 @@ fn table_row(out: &mut impl Write, row: &Row, widths: &[usize; 4]) -> io::Result
     writeln!(out)
 }
 
-fn main() -> io::Result<()> {
+fn list(out: &mut impl Write, layout: Layout) -> io::Result<u8> {
+    let entries = match read_entries(Path::new(".")) {
+        Ok(entries) => entries,
+        Err(err) => {
+            eprintln!("ls: cannot read directory '.': {err}");
+            return Ok(2);
+        }
+    };
+    let mut status = 0;
+    for entry in &entries {
+        if let Err(err) = &entry.meta {
+            let name = escape_name(&entry.name);
+            eprintln!("ls: cannot access '{name}': {err}");
+            status = 1;
+        }
+    }
+    render(out, layout, &entries, SystemTime::now())?;
+    Ok(status)
+}
+
+fn main() -> ExitCode {
     let stdout = io::stdout();
     let layout = if stdout.is_terminal() {
         Layout::Table
     } else {
         Layout::Tsv
     };
-    let entries = read_entries(Path::new("."))?;
-    render(&mut stdout.lock(), layout, &entries, SystemTime::now())
+    let mut out = BufWriter::new(stdout.lock());
+
+    let status = list(&mut out, layout);
+    // BufWriter's drop ignores write errors; flush by hand or `ls > /dev/full` exits 0 having
+    // written nothing
+    match status.and_then(|status| out.flush().map(|()| status)) {
+        Ok(status) => ExitCode::from(status),
+        // std ignores SIGPIPE, so a reader that went away comes back as EPIPE. it's done reading,
+        // that's not a failure
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("ls: write error: {err}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 #[cfg(test)]
